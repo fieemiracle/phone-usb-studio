@@ -1,0 +1,35 @@
+name: macOS release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Build universal DMG
+        run: ./package.sh "$GITHUB_REF_NAME"
+      - name: Publish preview release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > "$RUNNER_TEMP/phone-studio-release.md" <<'NOTES'
+          下载 DMG，打开后将 **Phone USB Studio** 拖到 **Applications**。支持 macOS 14 及以上、Apple 芯片和 Intel Mac。
+
+          此预览版使用临时签名，尚未通过 Apple 公证。首次打开如被 macOS 拦截，请核对下载来源，再按 [Apple 官方说明](https://support.apple.com/en-us/102445) 操作。
+
+          App 本体已编译，无需在朋友的电脑上构建。设备功能依赖本机工具：
+
+          - Android 投屏和录屏需要 ADB 与 scrcpy（`brew install android-platform-tools scrcpy`）。
+          - 鸿蒙需要 HDC，录屏还需要 FFmpeg。
+          - iPhone USB 投屏需要 libimobiledevice（`brew install libimobiledevice`）及 macOS 摄像头授权。反控需要在目标 iPhone 上运行已签名的 WebDriverAgent，录屏需要 FFmpeg，应用管理需要 Xcode。
+          NOTES
+          gh release create "$GITHUB_REF_NAME" build/release/*.dmg --verify-tag \
+            --title "Phone USB Studio $GITHUB_REF_NAME" --prerelease \
+            --notes-file "$RUNNER_TEMP/phone-studio-release.md"

@@ -4,9 +4,9 @@
   objectVersion = 56;
   objects = {
     000000000000000000000001 = {isa = PBXProject; mainGroup = 000000000000000000000002; productRefGroup = 000000000000000000000003; buildConfigurationList = 000000000000000000000009; compatibilityVersion = "Xcode 14.0"; targets = (000000000000000000000004); };
-    000000000000000000000002 = {isa = PBXGroup; children = (000000000000000000000005, 000000000000000000000006, 000000000000000000000010, 000000000000000000000003); sourceTree = "<group>"; };
+    000000000000000000000002 = {isa = PBXGroup; children = (000000000000000000000005, 000000000000000000000006, 000000000000000000000010, 000000000000000000000011, 000000000000000000000003); sourceTree = "<group>"; };
     000000000000000000000003 = {isa = PBXGroup; name = Products; children = (000000000000000000000007); sourceTree = "<group>"; };
-    000000000000000000000004 = {isa = PBXNativeTarget; name = PhoneUSBStudio; productName = PhoneUSBStudio; productReference = 000000000000000000000007; productType = "com.apple.product-type.application"; buildConfigurationList = 00000000000000000000000A; buildPhases = (000000000000000000000008); dependencies = (); };
+    000000000000000000000004 = {isa = PBXNativeTarget; name = PhoneUSBStudio; productName = PhoneUSBStudio; productReference = 000000000000000000000007; productType = "com.apple.product-type.application"; buildConfigurationList = 00000000000000000000000A; buildPhases = (000000000000000000000008, 000000000000000000000013); dependencies = (); };
     000000000000000000000005 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AndroidUSB.swift; sourceTree = "<group>"; };
     000000000000000000000006 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
     000000000000000000000007 = {isa = PBXFileReference; explicitFileType = wrapper.application; path = "Android USB.app"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -19,6 +19,9 @@
     00000000000000000000000E = {isa = XCBuildConfiguration; name = Debug; baseConfigurationReference = 000000000000000000000010; buildSettings = {}; };
     00000000000000000000000F = {isa = XCBuildConfiguration; name = Release; baseConfigurationReference = 000000000000000000000010; buildSettings = {}; };
     000000000000000000000010 = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = App.xcconfig; sourceTree = SOURCE_ROOT; };
+    000000000000000000000011 = {isa = PBXFileReference; lastKnownFileType = image.icns; path = Studio.icns; sourceTree = "<group>"; };
+    000000000000000000000012 = {isa = PBXBuildFile; fileRef = 000000000000000000000011; };
+    000000000000000000000013 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (000000000000000000000012); runOnlyForDeploymentPostprocessing = 0; };
   };
   rootObject = 000000000000000000000001;
 }

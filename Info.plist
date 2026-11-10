@@ -2,11 +2,23 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
-  <key>CFBundleIdentifier</key><string>local.android-usb</string>
-  <key>CFBundleName</key><string>Android USB</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleVersion</key><string>1</string>
-  <key>LSMinimumSystemVersion</key><string>14.0</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>local.android-usb</string>
+	<key>CFBundleName</key>
+	<string>Android USB</string>
+	<key>CFBundleIconFile</key>
+	<string>Studio.icns</string>
+	<key>CFBundleDisplayName</key>
+	<string>Phone Studio</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSCameraUsageDescription</key>
+	<string>读取通过 USB 连接的 iPhone 屏幕，用于在本应用内投屏。</string>
 </dict>
 </plist>

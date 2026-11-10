@@ -1,5 +1,91 @@
 import AppKit
+import AVFoundation
+import CoreMediaIO
+import CoreImage
 import SwiftUI
+
+private final class IOSScreenCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
+    private let queue = DispatchQueue(label: "local.android-usb.iphone-capture")
+    private let session = AVCaptureSession()
+    private let context = CIContext()
+    private let onFrame: @Sendable (CGImage) -> Void
+    private var lastFrame = 0.0
+    private var stopped = false
+
+    init(onFrame: @escaping @Sendable (CGImage) -> Void) {
+        self.onFrame = onFrame
+    }
+
+    func start(deviceID: String, failure: @escaping @Sendable (String) -> Void) {
+        queue.async {
+            var address = CMIOObjectPropertyAddress(
+                mSelector: CMIOObjectPropertySelector(kCMIOHardwarePropertyAllowScreenCaptureDevices),
+                mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeGlobal),
+                mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementMain))
+            var enabled: UInt32 = 1
+            let status = CMIOObjectSetPropertyData(CMIOObjectID(kCMIOObjectSystemObject),
+                                                   &address, 0, nil, 4, &enabled)
+            guard status == 0 else {
+                failure("无法启用 iPhone USB 屏幕源（\(status)）。")
+                return
+            }
+            self.discover(deviceID: deviceID, attempts: 8, failure: failure)
+        }
+    }
+
+    private func discover(deviceID: String, attempts: Int,
+                          failure: @escaping @Sendable (String) -> Void) {
+        guard !stopped else { return }
+        let sources = AVCaptureDevice.DiscoverySession(deviceTypes: [.external],
+                                                       mediaType: .muxed, position: .unspecified)
+        guard let device = sources.devices.first(where: { $0.uniqueID.caseInsensitiveCompare(deviceID) == .orderedSame }) else {
+            if attempts > 1 {
+                queue.asyncAfter(deadline: .now() + .milliseconds(400)) {
+                    self.discover(deviceID: deviceID, attempts: attempts - 1, failure: failure)
+                }
+            } else {
+                failure("没有找到这台 iPhone 的屏幕源。请解锁 iPhone 并确认 USB 信任。")
+            }
+            return
+        }
+        do {
+            let input = try AVCaptureDeviceInput(device: device)
+            let output = AVCaptureVideoDataOutput()
+            output.alwaysDiscardsLateVideoFrames = true
+            output.setSampleBufferDelegate(self, queue: queue)
+            guard session.canAddInput(input) else {
+                failure("无法打开 iPhone 屏幕输入。")
+                return
+            }
+            session.addInput(input)
+            guard session.canAddOutput(output) else {
+                failure("无法读取 iPhone 屏幕帧。")
+                return
+            }
+            session.addOutput(output)
+            session.startRunning()
+        } catch {
+            failure(error.localizedDescription)
+        }
+    }
+
+    func stop() {
+        queue.async {
+            self.stopped = true
+            if self.session.isRunning { self.session.stopRunning() }
+        }
+    }
+
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
+                       from connection: AVCaptureConnection) {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard !stopped, now - lastFrame >= 1.0 / 20,
+              let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        lastFrame = now
+        let image = CIImage(cvPixelBuffer: buffer)
+        if let frame = context.createCGImage(image, from: image.extent) { onFrame(frame) }
+    }
+}
 
 @MainActor
 final class Phone: ObservableObject {
@@ -16,25 +102,36 @@ final class Phone: ObservableObject {
 
     @Published var devices: [Device] = []
     @Published private(set) var harmonyDevices: [String] = []
-    @Published var deviceID = ""
+    @Published private(set) var iosDevices: [String] = []
+    @Published private(set) var iosModels: [String: String] = [:]
+    @Published var deviceID = "" {
+        didSet { if deviceID != oldValue { stopIOSControl() } }
+    }
     @Published private(set) var osVersions: [String: String] = [:]
     @Published var quality = 20
     private var previewID = UUID()
     private var recorder: Process?
-    private var harmonyRecording: (folder: URL, output: URL)?
-    private var harmonyFrameCount = 0
+    private var frameRecording: (folder: URL, output: URL, fps: Int)?
+    private var recordedFrameCount = 0
     @AppStorage("outputDirectory") var outputDirectory = ""
     private var previewProcess: Process?
+    private var iosCapture: IOSScreenCapture?
+    private var wdaProxy: Process?
+    private var wdaPort = 0
+    private var wdaSession: String?
+    private var wdaBusy = false
+    private var iosPreviewDeviceID: String?
     private var scanningDevices = false
     private var loadingVersions: Set<String> = []
     @Published private(set) var harmonyModels: [String: String] = [:]
 
     var isHarmony: Bool { harmonyDevices.contains(deviceID) }
-    var hasSelectedDevice: Bool { isHarmony || devices.contains { $0.id == deviceID } }
+    var isIOS: Bool { iosPreviewDeviceID == deviceID || iosDevices.contains(deviceID) }
+    var hasSelectedDevice: Bool { isIOS || isHarmony || devices.contains { $0.id == deviceID } }
 
-    private func run(_ tool: String, _ arguments: [String],
+    private func run(_ tool: String, _ arguments: [String], timeout: Duration? = nil,
                      completion: @escaping @MainActor (Int32, Data, String) -> Void) {
-        var locations = ["/opt/homebrew/bin", "/usr/local/bin"]
+        var locations = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
         if tool == "hdc" {
             let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/lib/hdc")
             let versions = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
@@ -73,6 +170,12 @@ final class Phone: ObservableObject {
             }
             try process.run()
             if tool == "scrcpy" { recorder = process }
+            if let timeout {
+                Task {
+                    try? await Task.sleep(for: timeout)
+                    if process.isRunning { process.interrupt() }
+                }
+            }
         } catch {
             try? FileManager.default.removeItem(at: directory)
             completion(1, Data(), error.localizedDescription)
@@ -82,6 +185,14 @@ final class Phone: ObservableObject {
     func scanDevices() {
         guard !scanningDevices else { return }
         scanningDevices = true
+        run("idevice_id", ["-l"]) { code, data, _ in
+            self.iosDevices = code == 0 ? String(decoding: data, as: UTF8.self)
+                .split(whereSeparator: \.isWhitespace).map(String.init) : []
+            self.iosDevices.forEach(self.loadOSVersion)
+            if self.deviceID.isEmpty && self.devices.isEmpty && self.harmonyDevices.isEmpty && !self.recording {
+                self.deviceID = self.iosDevices.first ?? ""
+            }
+        }
         run("hdc", ["list", "targets", "-v"]) { code, data, _ in
             self.harmonyDevices = code == 0
                 ? String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline).compactMap { line in
@@ -114,12 +225,12 @@ final class Phone: ObservableObject {
                     self.status = "当前投屏设备已断开。"
                 }
                 if !self.recording {
-                    self.deviceID = self.devices.first?.id ?? self.harmonyDevices.first ?? ""
+                    self.deviceID = self.devices.first?.id ?? self.harmonyDevices.first ?? self.iosDevices.first ?? ""
                 }
             }
             if lines.contains(where: { $0.split(whereSeparator: \.isWhitespace).dropFirst().first == "unauthorized" }) {
                 self.status = "有手机尚未授权。请解锁手机并确认「允许 USB 调试」。"
-            } else if self.devices.isEmpty && self.harmonyDevices.isEmpty && !self.recording {
+            } else if self.devices.isEmpty && self.harmonyDevices.isEmpty && self.iosDevices.isEmpty && !self.recording {
                 self.status = "未找到已授权的 USB 设备。请检查数据线和 USB 调试。"
             }
         }
@@ -128,6 +239,19 @@ final class Phone: ObservableObject {
     func loadOSVersion(for id: String) {
         guard !id.isEmpty, osVersions[id] == nil,
               loadingVersions.insert(id).inserted else { return }
+        if iosDevices.contains(id) {
+            run("ideviceinfo", ["-u", id, "-x"]) { code, data, _ in
+                self.loadingVersions.remove(id)
+                guard code == 0,
+                      let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+                else { return }
+                self.osVersions[id] = info["ProductVersion"] as? String
+                if let model = info["ProductType"] as? String {
+                    self.iosModels[id] = model == "iPhone11,2" ? "iPhone XS" : model
+                }
+            }
+            return
+        }
         let harmony = harmonyDevices.contains(id)
         let arguments = harmony
             ? ["-t", id, "shell", "param get const.product.os.dist.version; param get const.product.model"]
@@ -144,7 +268,27 @@ final class Phone: ObservableObject {
         }
     }
 
+    private func iosApps(_ arguments: [String]) {
+        guard isIOS else { return }
+        run("xcrun", ["devicectl", "device"] + arguments + ["--device", deviceID, "--timeout", "45"]) {
+            code, data, error in
+            let details = String(decoding: data, as: UTF8.self) + error
+            self.status = (code == 0 ? "" : "iPhone 应用操作失败。请检查 Xcode、USB 信任和开发者模式。\n")
+                + String(details.prefix(30_000))
+        }
+    }
+
+    func listApps() {
+        if isIOS {
+            iosApps(["info", "apps"])
+        } else {
+            command(isHarmony ? ["shell", "bm", "dump", "-a"] :
+                    ["shell", "pm", "list", "packages", "-3"])
+        }
+    }
+
     func command(_ arguments: [String]) {
+        guard hasSelectedDevice, !isIOS else { return }
         let harmony = isHarmony
         let target = harmony ? ["-t", deviceID] : ["-d"]
         run(harmony ? "hdc" : "adb", target + arguments) { code, data, error in
@@ -164,15 +308,29 @@ final class Phone: ObservableObject {
 
     func install() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = (isHarmony ? ["hap", "hsp"] : ["apk"]).compactMap { .init(filenameExtension: $0) }
+        panel.allowedContentTypes = (isIOS ? ["app"] : (isHarmony ? ["hap", "hsp"] : ["apk"]))
+            .compactMap { .init(filenameExtension: $0) }
+        if isIOS { panel.message = "选择已为这台 iPhone 签名的 iOS .app。 " }
         guard panel.runModal() == .OK, let file = panel.url else { return }
-        command(["install", "-r", file.path])
+        if isIOS {
+            iosApps(["install", "app", file.path])
+        } else {
+            command(["install", "-r", file.path])
+        }
+    }
+
+    private func iosFileCopy(toDevice: Bool, source: String, destination: String) {
+        iosApps(["copy", toDevice ? "to" : "from", "--domain-type", "temporary",
+                 "--domain-identifier", "local.phone-usb-studio",
+                 "--source", source, "--destination", destination])
     }
 
     func push() {
         let panel = NSOpenPanel()
         guard panel.runModal() == .OK, let file = panel.url else { return }
-        if isHarmony {
+        if isIOS {
+            iosFileCopy(toDevice: true, source: file.path, destination: file.lastPathComponent)
+        } else if isHarmony {
             guard let path = ask("鸿蒙文件推送",
                                  prompt: "输入设备上的目标绝对路径。默认使用 HDC 可写的调试目录。",
                                  initial: "/data/local/tmp/" + file.lastPathComponent),
@@ -184,6 +342,16 @@ final class Phone: ObservableObject {
     }
 
     func pull() {
+        if isIOS {
+            guard let name = ask("iPhone 文件获取", prompt: "输入此前推送到 Phone Studio 调试文件区的文件名。"),
+                  !name.isEmpty, name != ".", name != "..", !name.contains("/") else { return }
+            let panel = NSSavePanel()
+            panel.directoryURL = preferredDirectory
+            panel.nameFieldStringValue = name
+            guard panel.runModal() == .OK, let destination = panel.url else { return }
+            iosFileCopy(toDevice: false, source: name, destination: destination.path)
+            return
+        }
         guard let path = ask("文件获取", prompt: "输入手机上的绝对路径，例如 /sdcard/Download/example.txt"),
               path.hasPrefix("/") else { return }
         let panel = NSOpenPanel()
@@ -198,7 +366,11 @@ final class Phone: ObservableObject {
         guard let package = ask("卸载应用", prompt: "输入应用包名。卸载会移除应用及其数据。"),
               package.contains("."), package.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "." || $0 == "_") })
         else { return }
-        command(["uninstall", package])
+        if isIOS {
+            iosApps(["uninstall", "app", package])
+        } else {
+            command(["uninstall", package])
+        }
     }
 
     private func ask(_ title: String, prompt: String, initial: String = "") -> String? {
@@ -216,6 +388,11 @@ final class Phone: ObservableObject {
     }
 
     func start() {
+        guard hasSelectedDevice else { return }
+        if isIOS {
+            startIOSPreview()
+            return
+        }
         if isHarmony {
             previewID = UUID()
             mirroring = true
@@ -254,6 +431,43 @@ final class Phone: ObservableObject {
                 guard await self?.showFrame(data, id: id) == true else { return }
             }
             await self?.previewEnded(id)
+        }
+    }
+
+    private func startIOSPreview() {
+        let id = UUID()
+        let target = deviceID
+        iosPreviewDeviceID = target
+        previewID = id
+        mirroring = true
+        status = "正在打开 iPhone USB 屏幕源…"
+        Task {
+            let authorized = await AVCaptureDevice.requestAccess(for: .video)
+            guard previewID == id else { return }
+            guard authorized else {
+                stop()
+                status = "请在 macOS「隐私与安全性 → 摄像头」中允许本应用访问 iPhone USB 屏幕源。"
+                return
+            }
+            let capture = IOSScreenCapture { [weak self] image in
+                Task { @MainActor in
+                    guard let self, self.previewID == id else { return }
+                    if self.frame == nil { self.status = "iPhone USB 投屏已连接。" }
+                    self.frame = NSBitmapImageRep(cgImage: image)
+                }
+            }
+            iosCapture = capture
+            capture.start(deviceID: target) { [weak self] error in
+                Task { @MainActor in
+                    guard let self, self.previewID == id else { return }
+                    self.stop()
+                    self.status = error
+                }
+            }
+            try? await Task.sleep(for: .seconds(8))
+            guard previewID == id, frame == nil else { return }
+            stop()
+            status = "检测到 iPhone，但没有收到画面。请保持手机解锁，重新插线后再试。"
         }
     }
 
@@ -331,13 +545,126 @@ final class Phone: ObservableObject {
 
     func stop() {
         previewID = UUID()
+        if isIOS && frameRecording != nil { stopRecording() }
+        stopIOSControl()
+        iosCapture?.stop()
+        iosCapture = nil
+        iosPreviewDeviceID = nil
         if let process = previewProcess, process.isRunning { process.terminate() }
         previewProcess = nil
         mirroring = false
         frame = nil
     }
 
+    private func wdaRequest(_ path: String, body: [String: Any]? = nil) async throws -> [String: Any] {
+        guard let url = URL(string: "http://127.0.0.1:\(wdaPort)" + path) else {
+            throw URLError(.badURL)
+        }
+        var request = URLRequest(url: url, timeoutInterval: 5)
+        if let body {
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+        return payload
+    }
+
+    private func performIOSControl(_ action: @escaping @MainActor (String) async throws -> Void) {
+        guard isIOS, !wdaBusy else { return }
+        let target = deviceID
+        wdaBusy = true
+        Task {
+            defer { wdaBusy = false }
+            do {
+                if wdaProxy?.isRunning != true {
+                    guard let executable = ["/opt/homebrew/bin/iproxy", "/usr/local/bin/iproxy"]
+                        .first(where: FileManager.default.isExecutableFile(atPath:)) else {
+                        status = "找不到 iproxy。请安装 libusbmuxd。"
+                        return
+                    }
+                    let process = Process()
+                    wdaPort = Int.random(in: 49152...65535)
+                    process.executableURL = URL(fileURLWithPath: executable)
+                    process.arguments = ["-l", "-s", "127.0.0.1", "-u", target, "\(wdaPort):8100"]
+                    process.standardOutput = FileHandle.nullDevice
+                    process.standardError = FileHandle.nullDevice
+                    try process.run()
+                    wdaProxy = process
+                    try await Task.sleep(for: .milliseconds(250))
+                    guard process.isRunning else { throw URLError(.cannotConnectToHost) }
+                }
+                guard deviceID == target, wdaProxy?.isRunning == true else { return }
+                if wdaSession == nil {
+                    let reply = try await wdaRequest("/session", body: [
+                        "capabilities": ["alwaysMatch": ["shouldTerminateApp": false], "firstMatch": [[:]]]
+                    ])
+                    let value = reply["value"] as? [String: Any]
+                    wdaSession = (value?["sessionId"] as? String) ?? (reply["sessionId"] as? String)
+                }
+                guard deviceID == target, let id = wdaSession,
+                      id.range(of: #"^[A-Za-z0-9-]+$"#, options: .regularExpression) != nil else {
+                    throw URLError(.badServerResponse)
+                }
+                try await action("/session/" + id)
+                if deviceID == target { status = "iPhone USB 控制指令已执行。" }
+            } catch {
+                stopIOSControl()
+                if deviceID == target {
+                    status = "无法执行 iPhone 触控。请确认已为这台手机签名并运行 WebDriverAgent（端口 8100）。"
+                }
+            }
+        }
+    }
+
+    private func stopIOSControl() {
+        if let wdaProxy, wdaProxy.isRunning { wdaProxy.terminate() }
+        wdaProxy = nil
+        wdaSession = nil
+    }
+
+    func iosKey(_ name: String) {
+        performIOSControl { path in
+            switch name {
+            case "lock":
+                _ = try await self.wdaRequest("/wda/lock", body: [:])
+            case "home":
+                _ = try await self.wdaRequest("/wda/homescreen", body: [:])
+            default:
+                _ = try await self.wdaRequest(path + "/wda/pressButton", body: ["name": name])
+            }
+        }
+    }
+
     func input(_ drag: DragGesture.Value, size: CGSize, image: NSBitmapImageRep) {
+        if isIOS {
+            let origin = drag.startLocation
+            let destination = drag.location
+            let moved = hypot(drag.translation.width, drag.translation.height) >= 5
+            performIOSControl { path in
+                let response = try await self.wdaRequest("/wda/screen")
+                let value = response["value"] as? [String: Any]
+                let screen = value?["screenSize"] as? [String: Double]
+                let scale = value?["scale"] as? Double ?? 3
+                let width = screen?["width"] ?? Double(image.pixelsWide) / scale
+                let height = screen?["height"] ?? Double(image.pixelsHigh) / scale
+                func x(_ point: CGPoint) -> Double { max(0, min(width - 1, point.x / size.width * width)) }
+                func y(_ point: CGPoint) -> Double { max(0, min(height - 1, point.y / size.height * height)) }
+                if moved {
+                    _ = try await self.wdaRequest(path + "/wda/dragfromtoforduration", body: [
+                        "fromX": x(origin), "fromY": y(origin), "toX": x(destination),
+                        "toY": y(destination), "duration": 0.15
+                    ])
+                } else {
+                    _ = try await self.wdaRequest(path + "/wda/tap", body: ["x": x(origin), "y": y(origin)])
+                }
+            }
+            return
+        }
         func point(_ p: CGPoint) -> [String] {
             let x = Int(max(0, min(size.width, p.x)) / size.width * CGFloat(image.pixelsWide - 1))
             let y = Int(max(0, min(size.height, p.y)) / size.height * CGFloat(image.pixelsHigh - 1))
@@ -377,13 +704,18 @@ final class Phone: ObservableObject {
     }
 
     func startRecording() {
+        guard hasSelectedDevice else { return }
+        if isIOS && frame == nil {
+            status = "请先开始 iPhone 投屏，再录制屏幕。"
+            return
+        }
         let panel = NSSavePanel()
         panel.directoryURL = preferredDirectory
-        panel.nameFieldStringValue = "\(isHarmony ? "Harmony" : "Android")-\(Int(Date().timeIntervalSince1970)).mp4"
+        panel.nameFieldStringValue = "\(isIOS ? "iPhone" : (isHarmony ? "Harmony" : "Android"))-\(Int(Date().timeIntervalSince1970)).mp4"
         panel.allowedContentTypes = [.mpeg4Movie]
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        if isHarmony {
-            startHarmonyRecording(to: url)
+        if isHarmony || isIOS {
+            startFrameRecording(to: url)
             return
         }
         recording = true
@@ -397,63 +729,83 @@ final class Phone: ObservableObject {
         }
     }
 
-    private func startHarmonyRecording(to output: URL) {
+    private func startFrameRecording(to output: URL) {
         guard ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"]
             .contains(where: FileManager.default.isExecutableFile(atPath:)) else {
-            status = "鸿蒙录屏需要 FFmpeg。请运行 brew install ffmpeg。"
+            status = "录屏需要 FFmpeg。请运行 brew install ffmpeg。"
             return
         }
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
-            harmonyRecording = (folder, output)
-            harmonyFrameCount = 0
+            frameRecording = (folder, output, isIOS ? 10 : 1)
+            recordedFrameCount = 0
             recording = true
-            status = "正在录制鸿蒙画面。点击「停止录制」保存无声 MP4。"
-            recordHarmonyFrame(deviceID, folder: folder)
+            status = "正在录制画面。点击「停止录制」保存无声 MP4。"
+            if isIOS { recordIOSFrame(folder: folder) }
+            else { recordHarmonyFrame(deviceID, folder: folder) }
         } catch {
             status = error.localizedDescription
         }
     }
 
+    private func recordIOSFrame(folder: URL) {
+        guard frameRecording?.folder == folder,
+              let image = frame?.representation(using: .jpeg, properties: [.compressionFactor: 0.8]) else {
+            return
+        }
+        do {
+            let name = String(format: "%06d.jpeg", recordedFrameCount)
+            try image.write(to: folder.appendingPathComponent(name), options: .atomic)
+            recordedFrameCount += 1
+        } catch {
+            stopRecording()
+            return
+        }
+        Task {
+            try? await Task.sleep(for: .milliseconds(100))
+            if frameRecording?.folder == folder { recordIOSFrame(folder: folder) }
+        }
+    }
+
     private func recordHarmonyFrame(_ id: String, folder: URL) {
         captureHarmony(id, jpeg: true) { code, data, _ in
-            guard self.harmonyRecording?.folder == folder else { return }
+            guard self.frameRecording?.folder == folder else { return }
             guard code == 0, NSBitmapImageRep(data: data) != nil else {
                 self.stopRecording()
                 return
             }
             do {
-                let name = String(format: "%06d.jpeg", self.harmonyFrameCount)
+                let name = String(format: "%06d.jpeg", self.recordedFrameCount)
                 try data.write(to: folder.appendingPathComponent(name), options: .atomic)
-                self.harmonyFrameCount += 1
+                self.recordedFrameCount += 1
             } catch {
                 self.stopRecording()
                 return
             }
             Task {
                 try? await Task.sleep(for: .milliseconds(80))
-                guard self.harmonyRecording?.folder == folder else { return }
+                guard self.frameRecording?.folder == folder else { return }
                 self.recordHarmonyFrame(id, folder: folder)
             }
         }
     }
 
     func stopRecording() {
-        guard let session = harmonyRecording else {
+        guard let session = frameRecording else {
             if let recorder, recorder.isRunning { recorder.interrupt() }
             return
         }
-        harmonyRecording = nil
-        guard harmonyFrameCount > 0 else {
+        frameRecording = nil
+        guard recordedFrameCount > 0 else {
             try? FileManager.default.removeItem(at: session.folder)
             recording = false
-            status = "鸿蒙录屏未取得画面。"
+            status = "录屏未取得画面。"
             return
         }
-        status = "正在生成鸿蒙录屏…"
+        status = "正在生成录屏…"
         let video = session.folder.appendingPathComponent("recording.mp4")
-        run("ffmpeg", ["-v", "error", "-framerate", "1", "-i",
+        run("ffmpeg", ["-v", "error", "-framerate", String(session.fps), "-i",
                        session.folder.appendingPathComponent("%06d.jpeg").path,
                        "-vf", "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2",
                        "-c:v", "libx264", "-pix_fmt", "yuv420p", video.path]) { code, _, error in
@@ -462,7 +814,7 @@ final class Phone: ObservableObject {
                 try? FileManager.default.removeItem(at: session.folder)
             }
             guard code == 0 else {
-                self.status = "鸿蒙录屏生成失败。\n" + error
+                self.status = "录屏生成失败。\n" + error
                 return
             }
             do {
@@ -479,6 +831,10 @@ final class Phone: ObservableObject {
     }
 
     func exportLogs() {
+        if isIOS {
+            exportIOSLogs()
+            return
+        }
         let panel = NSSavePanel()
         let harmony = isHarmony
         let logName = harmony ? "HiLog" : "Logcat"
@@ -504,10 +860,34 @@ final class Phone: ObservableObject {
         }
     }
 
+    private func exportIOSLogs() {
+        let panel = NSSavePanel()
+        panel.directoryURL = preferredDirectory
+        panel.nameFieldStringValue = "iPhone-syslog-\(Int(Date().timeIntervalSince1970)).txt"
+        panel.allowedContentTypes = [.plainText]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        exportingLogs = true
+        status = "正在收集 iPhone 最近 5 秒的实时日志…"
+        run("idevicesyslog", ["-u", deviceID, "-x", "--no-colors"], timeout: .seconds(5)) { _, data, error in
+            defer { self.exportingLogs = false }
+            guard !data.isEmpty else {
+                self.status = "未收到 iPhone 实时日志。\n" + error
+                return
+            }
+            do {
+                try data.write(to: url, options: .atomic)
+                self.status = "iPhone 日志已保存到 \(url.lastPathComponent)"
+            } catch {
+                self.status = "保存日志失败。\n" + error.localizedDescription
+            }
+        }
+    }
+
     func screenshot() {
         let panel = NSSavePanel()
         panel.directoryURL = preferredDirectory
-        panel.nameFieldStringValue = "\(isHarmony ? "Harmony" : "Android")-\(Int(Date().timeIntervalSince1970)).png"
+        let platform = isIOS ? "iPhone" : (isHarmony ? "Harmony" : "Android")
+        panel.nameFieldStringValue = "\(platform)-\(Int(Date().timeIntervalSince1970)).png"
         panel.allowedContentTypes = [.png]
         guard panel.runModal() == .OK, let destination = panel.url else { return }
 
@@ -525,7 +905,22 @@ final class Phone: ObservableObject {
                 self.status = "保存失败。\(error.localizedDescription)"
             }
         }
-        if isHarmony {
+        if isIOS, let png = frame?.representation(using: .png, properties: [.gamma: 0.45455]) {
+            save(0, png, "")
+        } else if isIOS {
+            let temporary = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString + ".png")
+            run("idevicescreenshot", ["-u", deviceID, temporary.path]) { code, output, error in
+                defer { try? FileManager.default.removeItem(at: temporary) }
+                let data = (try? Data(contentsOf: temporary)) ?? Data()
+                if data.isEmpty {
+                    self.saving = false
+                    self.status = "iPhone 截图服务不可用。\n" + error + String(decoding: output, as: UTF8.self)
+                } else {
+                    save(code, data, error)
+                }
+            }
+        } else if isHarmony {
             captureHarmony(deviceID, completion: save)
         } else {
             run("adb", ["-d", "exec-out", "screencap", "-p"], completion: save)
@@ -539,6 +934,7 @@ struct AndroidUSB: App {
 
     @State private var page: Page = .home
     @State private var previewExpanded = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var directoryCollapsed = false
     @State private var toolsCollapsed = false
     @State private var zoom = 1.0
@@ -552,14 +948,10 @@ struct AndroidUSB: App {
     }
 
     var body: some Scene {
-        WindowGroup("Phone USB Studio") {
+        WindowGroup("Phone Studio") {
             HStack(spacing: 0) {
                 if !previewExpanded {
-                    if directoryCollapsed {
-                        collapsedRail("展开导航", icon: "sidebar.left") {
-                            directoryCollapsed = false
-                        }
-                    } else {
+                    sidebarPanel(width: 200, leading: true, collapsed: $directoryCollapsed) {
                         directory
                     }
                 }
@@ -577,27 +969,72 @@ struct AndroidUSB: App {
             }
         }
         .defaultSize(width: 1350, height: 820)
+        .commands {
+            CommandGroup(after: .appInfo) {
+                if Bundle.main.object(forInfoDictionaryKey: "StudioLocalSource") != nil {
+                    Button("从本地项目升级…", action: updateInstalledApp)
+                }
+            }
+        }
+    }
+
+    private func updateInstalledApp() {
+        guard let root = Bundle.main.object(forInfoDictionaryKey: "StudioLocalSource") as? String else { return }
+        let script = URL(fileURLWithPath: root).appendingPathComponent("run.sh")
+        guard FileManager.default.isExecutableFile(atPath: script.path) else {
+            showUpdateError("找不到原项目的启动脚本。")
+            return
+        }
+        let process = Process()
+        process.executableURL = script
+        process.arguments = ["--install"]
+        let errors = Pipe()
+        process.standardError = errors
+        process.terminationHandler = { process in
+            guard process.terminationStatus != 0 else { return }
+            let details = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            Task { @MainActor in showUpdateError(details) }
+        }
+        do {
+            try process.run()
+        } catch {
+            showUpdateError(error.localizedDescription)
+        }
+    }
+
+    private func showUpdateError(_ details: String) {
+        let alert = NSAlert()
+        alert.messageText = "无法升级 Phone Studio"
+        alert.informativeText = details
+        alert.runModal()
     }
 
     private var directory: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("PHONE STUDIO")
-                    .font(.system(size: 15, weight: .bold, design: .monospaced))
-                    .tracking(0.6)
-                    .foregroundStyle(.white.opacity(0.75))
+                Text("Phone Studio")
+                    .font(.system(size: 20, weight: .bold))
+                    .lineLimit(1)
                 Spacer(minLength: 4)
-                sidebarButton("收起导航", icon: "sidebar.left") {
-                    directoryCollapsed = true
-                }
             }
-            Text("设备工作台").font(.system(size: 18, weight: .semibold))
-                .padding(.bottom, 16)
+            .padding(.bottom, 12)
 
             navigation("首页", icon: "house", destination: .home, selected: page == .home)
             navigation("实用工具", icon: "wrench.and.screwdriver",
                        destination: .utilities, selected: page != .home)
             Spacer()
+            if Bundle.main.object(forInfoDictionaryKey: "StudioLocalSource") != nil {
+                Button(action: updateInstalledApp) {
+                    Label("升级并重启", systemImage: "arrow.clockwise")
+                        .font(.system(size: 14, weight: .semibold))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                        .background(.white.opacity(0.16), in: RoundedRectangle(cornerRadius: 8))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("从本地项目构建新版并重启")
+            }
         }
         .foregroundStyle(.white)
         .padding(16)
@@ -605,15 +1042,40 @@ struct AndroidUSB: App {
         .background(LinearGradient(colors: [blue, Color(red: 0.36, green: 0.67, blue: 0.96)], startPoint: .top, endPoint: .bottom))
     }
 
-    private func collapsedRail(_ title: String, icon: String,
-                               action: @escaping () -> Void) -> some View {
-        VStack {
-            sidebarButton(title, icon: icon, action: action)
-            Spacer(minLength: 0)
-        }
-        .padding(.top, 16)
-        .frame(width: 42)
-        .background(.regularMaterial)
+    private func sidebarPanel<Content: View>(width: CGFloat, leading: Bool,
+                                              collapsed: Binding<Bool>,
+                                              @ViewBuilder content: () -> Content) -> some View {
+        let hidden = collapsed.wrappedValue
+        let edge: Alignment = leading ? .trailing : .leading
+        let name = leading ? "导航" : "功能"
+        let arrow = leading == hidden ? "chevron.right" : "chevron.left"
+
+        return Rectangle()
+            .fill(.clear)
+            .frame(width: hidden ? 22 : width)
+            .overlay(alignment: edge) {
+                content()
+                    .frame(width: width)
+                    .offset(x: hidden ? (leading ? -22 : 22) : 0)
+                    .allowsHitTesting(!hidden)
+                    .accessibilityHidden(hidden)
+            }
+            .clipped()
+            .overlay(alignment: edge) {
+                Button {
+                    withAnimation(reduceMotion ? nil : .smooth(duration: 0.27, extraBounce: 0)) {
+                        collapsed.wrappedValue.toggle()
+                    }
+                } label: {
+                    Image(systemName: arrow)
+                        .font(.system(size: 9, weight: .semibold))
+                        .frame(width: 20, height: 42)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 5))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel((hidden ? "展开" : "收起") + name)
+                .help((hidden ? "展开" : "收起") + name)
+            }
     }
 
     private func sidebarButton(_ title: String, icon: String,
@@ -634,7 +1096,7 @@ struct AndroidUSB: App {
             page = destination
         } label: {
             Label(title, systemImage: icon)
-                .font(.callout.weight(.medium))
+                .font(.system(size: 16, weight: .semibold))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(10)
                 .foregroundStyle(selected ? blue : .white)
@@ -649,9 +1111,7 @@ struct AndroidUSB: App {
     private var landing: some View {
         VStack(alignment: .leading, spacing: 18) {
             let home = page == .home
-            toolCard(home ? "首页" : "工具目录") {
-                Text(home ? "Phone USB Studio" : "实用工具")
-                    .font(.largeTitle.weight(.semibold))
+            toolCard(nil) {
                 Text(home ? "通过 USB 连接 Android 或鸿蒙手机，在 Mac 上查看和操作设备。"
                           : "选择一个工具开始操作已连接的手机。")
                     .foregroundStyle(.secondary)
@@ -711,10 +1171,9 @@ struct AndroidUSB: App {
                         .background(.white, in: RoundedRectangle(cornerRadius: 11))
                         .clipShape(RoundedRectangle(cornerRadius: 11))
                     if !previewExpanded {
-                        if toolsCollapsed {
-                            collapsedRail("展开功能", icon: "sidebar.right") { toolsCollapsed = false }
-                        } else {
-                            tools.frame(width: max(268, geometry.size.width * 0.40))
+                        sidebarPanel(width: max(268, geometry.size.width * 0.40),
+                                     leading: false, collapsed: $toolsCollapsed) {
+                            tools
                         }
                     }
                 }
@@ -750,6 +1209,7 @@ struct AndroidUSB: App {
             }
             .labelsHidden()
             .frame(width: 90)
+            .disabled(phone.isIOS)
             .onChange(of: phone.quality) {
                 if phone.mirroring {
                     phone.stop()
@@ -770,7 +1230,7 @@ struct AndroidUSB: App {
     }
 
     private var devicePicker: some View {
-        let ids = phone.devices.map(\.id) + phone.harmonyDevices
+        let ids = phone.devices.map(\.id) + phone.harmonyDevices + phone.iosDevices
         return Button {
             deviceMenuOpen.toggle()
         } label: {
@@ -841,14 +1301,15 @@ struct AndroidUSB: App {
 
     private func deviceTitle(_ id: String) -> String {
         let masked = id.count >= 8 ? "\(id.prefix(id.count == 8 ? 2 : 4))****\(id.suffix(id.count == 8 ? 2 : 4))" : id
-        let model = phone.harmonyModels[id] ?? phone.devices.first(where: { $0.id == id })?.name ?? "Harmony"
+        let model = phone.iosModels[id] ?? phone.harmonyModels[id] ?? phone.devices.first(where: { $0.id == id })?.name ?? "Harmony"
         return "\(masked)（\(model)）"
     }
 
     private func deviceDetails(_ id: String) -> String {
         let harmony = phone.harmonyDevices.contains(id)
-        let platform = harmony ? "Harmony" : "Android"
-        let system = harmony ? "HarmonyOS" : "Android"
+        let ios = phone.iosDevices.contains(id) || (phone.isIOS && phone.deviceID == id)
+        let platform = ios ? "iPhone" : (harmony ? "Harmony" : "Android")
+        let system = ios ? "iOS" : (harmony ? "HarmonyOS" : "Android")
         let os = phone.osVersions[id].map { "\(system) \($0)" } ?? system
         return "\(platform) · \(os)"
     }
@@ -858,30 +1319,34 @@ struct AndroidUSB: App {
             VStack(spacing: 9) {
                 toolCard("按键区") {
                     HStack(spacing: 6) {
-                        tile("电源键", "power") { phone.command(phone.isHarmony ? ["shell", "uitest", "uiInput", "keyEvent", "Power"] :
-                            ["shell", "input", "keyevent", "26"]) }
-                        tile("返回", "arrow.left.circle") { phone.command(phone.isHarmony ? ["shell", "uitest", "uiInput", "keyEvent", "Back"] :
-                            ["shell", "input", "keyevent", "4"]) }
-                        tile("音量加", "speaker.plus") {
-                            phone.command(phone.isHarmony ? ["shell", "uitest", "uiInput", "keyEvent", "16"] :
-                                          ["shell", "input", "keyevent", "24"])
-                        }
-                        tile("音量减", "speaker.minus") {
-                            phone.command(phone.isHarmony ? ["shell", "uitest", "uiInput", "keyEvent", "17"] :
-                                          ["shell", "input", "keyevent", "25"])
+                        if phone.isIOS {
+                            tile("锁屏", "lock") { phone.iosKey("lock") }
+                            tile("主屏幕", "house") { phone.iosKey("home") }
+                            tile("音量加", "speaker.plus") { phone.iosKey("volumeUp") }
+                            tile("音量减", "speaker.minus") { phone.iosKey("volumeDown") }
+                        } else {
+                            tile("电源键", "power") { phone.command(phone.isHarmony ? ["shell", "uitest", "uiInput", "keyEvent", "Power"] :
+                                ["shell", "input", "keyevent", "26"]) }
+                            tile("返回", "arrow.left.circle") { phone.command(phone.isHarmony ? ["shell", "uitest", "uiInput", "keyEvent", "Back"] :
+                                ["shell", "input", "keyevent", "4"]) }
+                            tile("音量加", "speaker.plus") {
+                                phone.command(phone.isHarmony ? ["shell", "uitest", "uiInput", "keyEvent", "16"] :
+                                              ["shell", "input", "keyevent", "24"])
+                            }
+                            tile("音量减", "speaker.minus") {
+                                phone.command(phone.isHarmony ? ["shell", "uitest", "uiInput", "keyEvent", "17"] :
+                                              ["shell", "input", "keyevent", "25"])
+                            }
                         }
                         Spacer(minLength: 0)
-                        sidebarButton("收起功能", icon: "sidebar.right") { toolsCollapsed = true }
+
                     }
                 }
                 toolCard("设备/应用信息") {
                     HStack(spacing: 6) {
                         tile("安装应用", "square.and.arrow.down", phone.install)
                         tile("卸载应用", "trash", phone.uninstall)
-                        tile("应用信息", "square.grid.2x2") {
-                            phone.command(phone.isHarmony ? ["shell", "bm", "dump", "-a"] :
-                                          ["shell", "pm", "list", "packages", "-3"])
-                        }
+                        tile("应用信息", "square.grid.2x2", phone.listApps)
                     }
                 }
                 toolCard("文件信息") {
@@ -910,14 +1375,16 @@ struct AndroidUSB: App {
                         Button("更改目录…", action: phone.chooseOutputDirectory)
                     }
                 }
-                toolCard("自定义指令") {
-                    HStack {
-                        Text(phone.isHarmony ? "hdc shell" : "adb shell")
-                        TextField("输入设备 shell 命令", text: $shellCommand)
-                        Button("发送") { phone.command(["shell", shellCommand]) }
-                            .buttonStyle(.borderedProminent)
-                            .tint(blue)
-                            .disabled(phone.deviceID.isEmpty || shellCommand.trimmingCharacters(in: .whitespaces).isEmpty)
+                if !phone.isIOS {
+                    toolCard("自定义指令") {
+                        HStack {
+                            Text(phone.isHarmony ? "hdc shell" : "adb shell")
+                            TextField("输入设备 shell 命令", text: $shellCommand)
+                            Button("发送") { phone.command(["shell", shellCommand]) }
+                                .buttonStyle(.borderedProminent)
+                                .tint(blue)
+                                .disabled(phone.deviceID.isEmpty || shellCommand.trimmingCharacters(in: .whitespaces).isEmpty)
+                        }
                     }
                 }
                 toolCard("执行日志") {
@@ -954,10 +1421,10 @@ struct AndroidUSB: App {
         .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(.black.opacity(0.10)).allowsHitTesting(false) }
     }
 
-    private func toolCard<Content: View>(_ title: String,
+    private func toolCard<Content: View>(_ title: String?,
                                          @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.system(size: 15, weight: .semibold))
+            if let title { Text(title).font(.system(size: 15, weight: .semibold)) }
             content()
         }
         .padding(11)
@@ -993,6 +1460,7 @@ struct AndroidUSB: App {
                     } else {
                         VStack(spacing: 11) {
                             Text(phone.mirroring ? "正在读取手机画面…" :
+                                 phone.isIOS ? "iPhone 已连接。解锁手机后，点击上方的「开始投屏」。" :
                                  "在手机的「开发者选项」中开启 USB 调试，\n连接并授权后，点击上方的「开始投屏」。")
                                 .foregroundStyle(Color(red: 0.50, green: 0.53, blue: 0.58))
                         }

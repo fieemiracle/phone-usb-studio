@@ -25,3 +25,9 @@ brew install scrcpy android-platform-tools
 鸿蒙支持点击、滑动、PNG 截图、HiLog、HAP/HSP 安装、应用卸载和 HDC 文件传输。鸿蒙录屏使用 JPEG 采样生成约 1 FPS 的无声 MP4，需要安装 FFmpeg（`brew install ffmpeg`）。
 
 在投屏页右侧的「保存位置」中可修改截图、日志、录屏和文件获取的默认保存目录。Android 日志导出 Logcat 的 main、system、crash 缓冲区，鸿蒙导出当前 HiLog 缓冲区。
+
+## iPhone USB
+
+通过 USB 连接并信任这台 Mac。设备识别需要 `brew install libimobiledevice`，投屏首次启动需要允许 macOS 摄像头权限。投屏后可截屏，也可用 FFmpeg 录制约 10 FPS 的无声 MP4。文件推送和获取使用 Phone Studio 的独立调试文件区，获取时输入此前推送的文件名。
+
+点击、拖动、主屏幕、锁屏和音量键需要 WebDriverAgent。用 Xcode 为目标 iPhone 签名并运行 Appium 的 WebDriverAgentRunner 测试，让它在手机的 8100 端口监听。保持测试运行，App 会用 `iproxy` 从本机通过 USB 连接。安装和卸载 iOS 应用使用 Xcode 的 devicectl，安装要求为该手机签名的 iOS .app。

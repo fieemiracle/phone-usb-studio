@@ -21,8 +21,16 @@ final class Phone: ObservableObject {
     @Published var quality = 20
     private var previewID = UUID()
     private var recorder: Process?
+    private var harmonyRecording: (folder: URL, output: URL)?
+    private var harmonyFrameCount = 0
+    @AppStorage("outputDirectory") var outputDirectory = ""
     private var previewProcess: Process?
     private var scanningDevices = false
+    private var loadingVersions: Set<String> = []
+    @Published private(set) var harmonyModels: [String: String] = [:]
+
+    var isHarmony: Bool { harmonyDevices.contains(deviceID) }
+    var hasSelectedDevice: Bool { isHarmony || devices.contains { $0.id == deviceID } }
 
     private func run(_ tool: String, _ arguments: [String],
                      completion: @escaping @MainActor (Int32, Data, String) -> Void) {
@@ -80,6 +88,10 @@ final class Phone: ObservableObject {
                     let fields = line.split(whereSeparator: \.isWhitespace)
                     return fields.contains("USB") && fields.contains("Connected") ? fields.first.map(String.init) : nil
                 } : []
+            self.harmonyDevices.forEach(self.loadOSVersion)
+            if self.deviceID.isEmpty && self.devices.isEmpty && !self.recording {
+                self.deviceID = self.harmonyDevices.first ?? ""
+            }
         }
         run("adb", ["devices", "-l"]) { code, data, error in
             defer { self.scanningDevices = false }
@@ -95,45 +107,64 @@ final class Phone: ObservableObject {
                 let model = fields.first(where: { $0.hasPrefix("model:") })?.dropFirst(6)
                 return Device(id: String(fields[0]), name: model.map(String.init) ?? String(fields[0]))
             }
-            if !self.devices.contains(where: { $0.id == self.deviceID }) {
+            self.devices.forEach { self.loadOSVersion(for: $0.id) }
+            if !self.hasSelectedDevice {
                 if self.mirroring {
                     self.stop()
                     self.status = "当前投屏设备已断开。"
                 }
                 if !self.recording {
-                    self.deviceID = self.devices.first?.id ?? ""
+                    self.deviceID = self.devices.first?.id ?? self.harmonyDevices.first ?? ""
                 }
             }
             if lines.contains(where: { $0.split(whereSeparator: \.isWhitespace).dropFirst().first == "unauthorized" }) {
                 self.status = "有手机尚未授权。请解锁手机并确认「允许 USB 调试」。"
-            } else if self.devices.isEmpty && !self.recording {
+            } else if self.devices.isEmpty && self.harmonyDevices.isEmpty && !self.recording {
                 self.status = "未找到已授权的 USB 设备。请检查数据线和 USB 调试。"
             }
         }
     }
 
     func loadOSVersion(for id: String) {
-        guard !id.isEmpty else { return }
-        run("adb", ["-s", id, "shell", "getprop", "ro.build.version.release"]) { code, data, _ in
-            let version = String(decoding: data, as: UTF8.self)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if code == 0, !version.isEmpty {
+        guard !id.isEmpty, osVersions[id] == nil,
+              loadingVersions.insert(id).inserted else { return }
+        let harmony = harmonyDevices.contains(id)
+        let arguments = harmony
+            ? ["-t", id, "shell", "param get const.product.os.dist.version; param get const.product.model"]
+            : ["-s", id, "shell", "getprop", "ro.build.version.release"]
+        run(harmony ? "hdc" : "adb", arguments) { code, data, _ in
+            self.loadingVersions.remove(id)
+            let values = String(decoding: data, as: UTF8.self)
+                .split(whereSeparator: \.isNewline)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            if code == 0, let version = values.first, version.first?.isNumber == true {
                 self.osVersions[id] = version
+                if harmony, values.count > 1, !values[1].isEmpty { self.harmonyModels[id] = values[1] }
             }
         }
     }
 
     func command(_ arguments: [String]) {
-        run("adb", ["-d"] + arguments) { code, data, error in
+        let harmony = isHarmony
+        let target = harmony ? ["-t", deviceID] : ["-d"]
+        run(harmony ? "hdc" : "adb", target + arguments) { code, data, error in
             let output = String(decoding: data, as: UTF8.self)
-            self.status = code == 0 && output.isEmpty && error.isEmpty
-                ? "操作完成。" : String((output + error).prefix(30_000))
+            let details = (output + error).trimmingCharacters(in: .whitespacesAndNewlines)
+            let packageOperation = arguments.first == "install" || arguments.first == "uninstall"
+            // HDC reports bundle-manager failures in the output even when it exits with zero.
+            let bundleFailure = harmony && packageOperation &&
+                details.localizedCaseInsensitiveContains("msg:error:")
+            if code != 0 || bundleFailure {
+                self.status = "操作失败。\n" + String(details.prefix(30_000))
+            } else {
+                self.status = details.isEmpty ? "操作完成。" : String(details.prefix(30_000))
+            }
         }
     }
 
     func install() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.init(filenameExtension: "apk") ?? .data]
+        panel.allowedContentTypes = (isHarmony ? ["hap", "hsp"] : ["apk"]).compactMap { .init(filenameExtension: $0) }
         guard panel.runModal() == .OK, let file = panel.url else { return }
         command(["install", "-r", file.path])
     }
@@ -141,7 +172,15 @@ final class Phone: ObservableObject {
     func push() {
         let panel = NSOpenPanel()
         guard panel.runModal() == .OK, let file = panel.url else { return }
-        command(["push", file.path, "/sdcard/Download/"])
+        if isHarmony {
+            guard let path = ask("鸿蒙文件推送",
+                                 prompt: "输入设备上的目标绝对路径。默认使用 HDC 可写的调试目录。",
+                                 initial: "/data/local/tmp/" + file.lastPathComponent),
+                  path.hasPrefix("/") else { return }
+            command(["file", "send", file.path, path])
+        } else {
+            command(["push", file.path, "/sdcard/Download/"])
+        }
     }
 
     func pull() {
@@ -150,22 +189,24 @@ final class Phone: ObservableObject {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
+        panel.directoryURL = preferredDirectory
         guard panel.runModal() == .OK, let directory = panel.url else { return }
-        command(["pull", path, directory.path])
+        command(isHarmony ? ["file", "recv", path, directory.path] : ["pull", path, directory.path])
     }
 
     func uninstall() {
-        guard let package = ask("卸载应用", prompt: "输入 Android 包名。卸载会移除应用及其数据。"),
+        guard let package = ask("卸载应用", prompt: "输入应用包名。卸载会移除应用及其数据。"),
               package.contains("."), package.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "." || $0 == "_") })
         else { return }
         command(["uninstall", package])
     }
 
-    private func ask(_ title: String, prompt: String) -> String? {
+    private func ask(_ title: String, prompt: String, initial: String = "") -> String? {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = prompt
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.stringValue = initial
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
         alert.addButton(withTitle: "确认")
@@ -175,6 +216,13 @@ final class Phone: ObservableObject {
     }
 
     func start() {
+        if isHarmony {
+            previewID = UUID()
+            mirroring = true
+            status = "正在连接鸿蒙手机…"
+            refreshHarmony(previewID, device: deviceID)
+            return
+        }
         let paths = ["/opt/homebrew/bin/adb", "/usr/local/bin/adb"]
         guard let adb = paths.first(where: FileManager.default.isExecutableFile(atPath:)) else {
             status = "找不到 adb。请安装 android-platform-tools。"
@@ -206,6 +254,38 @@ final class Phone: ObservableObject {
                 guard await self?.showFrame(data, id: id) == true else { return }
             }
             await self?.previewEnded(id)
+        }
+    }
+
+    private func captureHarmony(_ id: String, jpeg: Bool = false,
+                                completion: @escaping @MainActor (Int32, Data, String) -> Void) {
+        let path = "/data/local/tmp/phone-studio-\(UUID().uuidString).\(jpeg ? "jpeg" : "png")"
+        let capture = jpeg ? "snapshot_display -t jpeg -f \(path)" : "uitest screenCap -p \(path)"
+        let command = "trap 'rm -f \(path)' EXIT; \(capture) >/dev/null && base64 \(path)"
+        run("hdc", ["-t", id, "shell", command]) { code, output, error in
+            let image = Data(base64Encoded: output, options: .ignoreUnknownCharacters)
+            completion(code, image ?? Data(), error)
+        }
+    }
+
+    private func refreshHarmony(_ session: UUID, device: String, jpeg: Bool = true) {
+        captureHarmony(device, jpeg: jpeg) { code, data, _ in
+            guard self.previewID == session else { return }
+            guard code == 0, let image = NSBitmapImageRep(data: data) else {
+                if jpeg {
+                    self.refreshHarmony(session, device: device, jpeg: false)
+                } else {
+                    self.previewEnded(session)
+                }
+                return
+            }
+            if self.frame == nil { self.status = "已连接。点击或拖动中间画面来操作手机。" }
+            self.frame = image
+            Task {
+                try? await Task.sleep(for: .milliseconds(self.quality))
+                guard self.previewID == session else { return }
+                self.refreshHarmony(session, device: device, jpeg: jpeg)
+            }
         }
     }
 
@@ -266,17 +346,46 @@ final class Phone: ObservableObject {
         let start = point(drag.startLocation)
         let end = point(drag.location)
         let moved = hypot(drag.translation.width, drag.translation.height) >= 5
+        if isHarmony {
+            let gesture = moved ? ["swipe"] + start + end + ["2500"] : ["click"] + start
+            run("hdc", ["-t", deviceID, "shell", "uitest", "uiInput"] + gesture) { code, _, error in
+                if code != 0 { self.status = "鸿蒙触控失败。\n" + error }
+            }
+            return
+        }
         let command = moved ? ["swipe"] + start + end + ["150"] : ["tap"] + start
         run("adb", ["-d", "shell", "input"] + command) { code, _, error in
             if code != 0 { self.status = "触控失败。\n" + error }
         }
     }
 
+    private var preferredDirectory: URL? {
+        if !outputDirectory.isEmpty { return URL(fileURLWithPath: outputDirectory, isDirectory: true) }
+        return FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+    }
+
+    func chooseOutputDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.directoryURL = preferredDirectory
+        panel.prompt = "设为保存目录"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        outputDirectory = url.path
+        status = "默认保存目录：\(url.path)"
+    }
+
     func startRecording() {
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "Android-\(Int(Date().timeIntervalSince1970)).mp4"
+        panel.directoryURL = preferredDirectory
+        panel.nameFieldStringValue = "\(isHarmony ? "Harmony" : "Android")-\(Int(Date().timeIntervalSince1970)).mp4"
         panel.allowedContentTypes = [.mpeg4Movie]
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        if isHarmony {
+            startHarmonyRecording(to: url)
+            return
+        }
         recording = true
         status = "正在录屏。点击「停止录屏」保存 MP4。"
         run("scrcpy", ["-d", "--no-playback", "--no-control", "--no-audio",
@@ -288,17 +397,99 @@ final class Phone: ObservableObject {
         }
     }
 
+    private func startHarmonyRecording(to output: URL) {
+        guard ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"]
+            .contains(where: FileManager.default.isExecutableFile(atPath:)) else {
+            status = "鸿蒙录屏需要 FFmpeg。请运行 brew install ffmpeg。"
+            return
+        }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+            harmonyRecording = (folder, output)
+            harmonyFrameCount = 0
+            recording = true
+            status = "正在录制鸿蒙画面。点击「停止录制」保存无声 MP4。"
+            recordHarmonyFrame(deviceID, folder: folder)
+        } catch {
+            status = error.localizedDescription
+        }
+    }
+
+    private func recordHarmonyFrame(_ id: String, folder: URL) {
+        captureHarmony(id, jpeg: true) { code, data, _ in
+            guard self.harmonyRecording?.folder == folder else { return }
+            guard code == 0, NSBitmapImageRep(data: data) != nil else {
+                self.stopRecording()
+                return
+            }
+            do {
+                let name = String(format: "%06d.jpeg", self.harmonyFrameCount)
+                try data.write(to: folder.appendingPathComponent(name), options: .atomic)
+                self.harmonyFrameCount += 1
+            } catch {
+                self.stopRecording()
+                return
+            }
+            Task {
+                try? await Task.sleep(for: .milliseconds(80))
+                guard self.harmonyRecording?.folder == folder else { return }
+                self.recordHarmonyFrame(id, folder: folder)
+            }
+        }
+    }
+
     func stopRecording() {
-        recorder?.interrupt()
+        guard let session = harmonyRecording else {
+            if let recorder, recorder.isRunning { recorder.interrupt() }
+            return
+        }
+        harmonyRecording = nil
+        guard harmonyFrameCount > 0 else {
+            try? FileManager.default.removeItem(at: session.folder)
+            recording = false
+            status = "鸿蒙录屏未取得画面。"
+            return
+        }
+        status = "正在生成鸿蒙录屏…"
+        let video = session.folder.appendingPathComponent("recording.mp4")
+        run("ffmpeg", ["-v", "error", "-framerate", "1", "-i",
+                       session.folder.appendingPathComponent("%06d.jpeg").path,
+                       "-vf", "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2",
+                       "-c:v", "libx264", "-pix_fmt", "yuv420p", video.path]) { code, _, error in
+            defer {
+                self.recording = false
+                try? FileManager.default.removeItem(at: session.folder)
+            }
+            guard code == 0 else {
+                self.status = "鸿蒙录屏生成失败。\n" + error
+                return
+            }
+            do {
+                if FileManager.default.fileExists(atPath: session.output.path) {
+                    _ = try FileManager.default.replaceItemAt(session.output, withItemAt: video)
+                } else {
+                    try FileManager.default.moveItem(at: video, to: session.output)
+                }
+                self.status = "录屏已保存到 \(session.output.lastPathComponent)"
+            } catch {
+                self.status = "保存录屏失败。\n" + error.localizedDescription
+            }
+        }
     }
 
     func exportLogs() {
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "Android-logcat-\(Int(Date().timeIntervalSince1970)).txt"
+        let harmony = isHarmony
+        let logName = harmony ? "HiLog" : "Logcat"
+        panel.directoryURL = preferredDirectory
+        panel.nameFieldStringValue = "\(logName)-\(Int(Date().timeIntervalSince1970)).txt"
         panel.allowedContentTypes = [.plainText]
         guard panel.runModal() == .OK, let url = panel.url else { return }
         exportingLogs = true
-        run("adb", ["-d", "logcat", "-d", "-v", "threadtime"]) { code, data, error in
+        let arguments = harmony ? ["-t", deviceID, "shell", "hilog", "-x"] :
+            ["-d", "logcat", "-b", "main", "-b", "system", "-b", "crash", "-d", "-v", "threadtime"]
+        run(harmony ? "hdc" : "adb", arguments) { code, data, error in
             defer { self.exportingLogs = false }
             guard code == 0 else {
                 self.status = "导出日志失败。\n" + error
@@ -306,7 +497,7 @@ final class Phone: ObservableObject {
             }
             do {
                 try data.write(to: url, options: .atomic)
-                self.status = "Logcat 已保存到 \(url.lastPathComponent)"
+                self.status = "\(logName) 已保存到 \(url.lastPathComponent)"
             } catch {
                 self.status = "保存日志失败。\(error.localizedDescription)"
             }
@@ -315,24 +506,29 @@ final class Phone: ObservableObject {
 
     func screenshot() {
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "Android-\(Int(Date().timeIntervalSince1970)).png"
+        panel.directoryURL = preferredDirectory
+        panel.nameFieldStringValue = "\(isHarmony ? "Harmony" : "Android")-\(Int(Date().timeIntervalSince1970)).png"
         panel.allowedContentTypes = [.png]
         guard panel.runModal() == .OK, let destination = panel.url else { return }
 
         saving = true
-        run("adb", ["-d", "exec-out", "screencap", "-p"]) { code, data, error in
+        let save: @MainActor (Int32, Data, String) -> Void = { code, data, error in
             defer { self.saving = false }
-            guard code == 0, let bitmap = NSBitmapImageRep(data: data),
-                  let png = bitmap.representation(using: .png, properties: [:]) else {
-                self.status = "截图失败。请确认只连接了一台已授权的 USB 设备。\n" + error
+            guard code == 0, NSBitmapImageRep(data: data) != nil else {
+                self.status = "截图失败。请检查所选设备的 USB 调试连接。\n" + error
                 return
             }
             do {
-                try png.write(to: destination, options: .atomic)
+                try data.write(to: destination, options: .atomic)
                 self.status = "截图已保存到 \(destination.lastPathComponent)"
             } catch {
                 self.status = "保存失败。\(error.localizedDescription)"
             }
+        }
+        if isHarmony {
+            captureHarmony(deviceID, completion: save)
+        } else {
+            run("adb", ["-d", "exec-out", "screencap", "-p"], completion: save)
         }
     }
 }
@@ -346,6 +542,7 @@ struct AndroidUSB: App {
     @State private var directoryCollapsed = false
     @State private var toolsCollapsed = false
     @State private var zoom = 1.0
+    @State private var deviceMenuOpen = false
     @State private var shellCommand = ""
     private let blue = Color(red: 0, green: 0.49, blue: 1)
     private let canvas = Color(red: 0.94, green: 0.95, blue: 0.96)
@@ -455,7 +652,7 @@ struct AndroidUSB: App {
             toolCard(home ? "首页" : "工具目录") {
                 Text(home ? "Phone USB Studio" : "实用工具")
                     .font(.largeTitle.weight(.semibold))
-                Text(home ? "通过 USB 连接 Android 手机，在 Mac 上查看和操作设备。"
+                Text(home ? "通过 USB 连接 Android 或鸿蒙手机，在 Mac 上查看和操作设备。"
                           : "选择一个工具开始操作已连接的手机。")
                     .foregroundStyle(.secondary)
             }
@@ -538,55 +735,7 @@ struct AndroidUSB: App {
 
     private var toolbar: some View {
         HStack(spacing: 10) {
-            HStack(spacing: 6) {
-                if let device = phone.devices.first(where: { $0.id == phone.deviceID }) {
-                    deviceTag("机型 · \(device.name)", color: Color(red: 0.07, green: 0.34, blue: 0.72))
-                    let os = phone.osVersions[device.id].map { "Android " + $0 } ?? "Android"
-                    deviceTag("OS · \(os)", color: Color(red: 0.10, green: 0.39, blue: 0.28))
-                        .fixedSize(horizontal: true, vertical: false)
-                } else {
-                    Text("选择设备").foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 0)
-                Menu {
-                    ForEach(phone.devices) { device in
-                        Button {
-                            guard device.id != phone.deviceID else { return }
-                            let resume = phone.mirroring
-                            if resume { phone.stop() }
-                            phone.deviceID = device.id
-                            if resume { phone.start() }
-                        } label: {
-                            let title = "\(device.name) · \(device.id)"
-                            if device.id == phone.deviceID {
-                                Label(title, systemImage: "checkmark")
-                            } else {
-                                Text(title)
-                            }
-                        }
-                    }
-                    ForEach(phone.harmonyDevices, id: \.self) { id in
-                        Button("鸿蒙 · \(id)（投屏待支持）") {}
-                            .disabled(true)
-                    }
-                } label: {
-                    Image(systemName: "chevron.down").font(.caption)
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .accessibilityLabel("切换设备")
-                .disabled((phone.devices.isEmpty && phone.harmonyDevices.isEmpty) || phone.recording)
-            }
-            .padding(.horizontal, 9)
-            .frame(height: 34)
-            .frame(maxWidth: 400)
-            .background(.white, in: RoundedRectangle(cornerRadius: 6))
-            .overlay {
-                RoundedRectangle(cornerRadius: 6).strokeBorder(.black.opacity(0.12))
-                    .allowsHitTesting(false)
-            }
-            .task(id: phone.deviceID) { phone.loadOSVersion(for: phone.deviceID) }
+            devicePicker
             sidebarButton("刷新设备", icon: "arrow.clockwise", action: phone.scanDevices)
             Button(phone.mirroring ? "停止投屏" : "开始投屏") {
                 if phone.mirroring { phone.stop() } else { phone.start() }
@@ -594,7 +743,7 @@ struct AndroidUSB: App {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .tint(blue)
-            .disabled(!phone.devices.contains(where: { $0.id == phone.deviceID }) && !phone.mirroring)
+            .disabled(!phone.hasSelectedDevice && !phone.mirroring)
             Picker("刷新频率", selection: $phone.quality) {
                 Text("流畅").tag(20)
                 Text("省资源").tag(250)
@@ -620,14 +769,88 @@ struct AndroidUSB: App {
         .frame(height: 40)
     }
 
-    private func deviceTag(_ title: String, color: Color) -> some View {
-        Text(title)
-            .font(.system(size: 11, weight: .semibold))
-            .lineLimit(1)
-            .foregroundStyle(color)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 4)
-            .background(color.opacity(0.10), in: RoundedRectangle(cornerRadius: 4))
+    private var devicePicker: some View {
+        let ids = phone.devices.map(\.id) + phone.harmonyDevices
+        return Button {
+            deviceMenuOpen.toggle()
+        } label: {
+            HStack {
+                Text(phone.hasSelectedDevice ? deviceTitle(phone.deviceID) : "选择设备")
+                    .lineLimit(1)
+                    .foregroundStyle(phone.hasSelectedDevice ? Color.primary : .secondary)
+                Spacer(minLength: 6)
+                Image(systemName: deviceMenuOpen ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 34)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: 400)
+        .background(.white, in: RoundedRectangle(cornerRadius: 5))
+        .overlay {
+            RoundedRectangle(cornerRadius: 5)
+                .strokeBorder(deviceMenuOpen ? blue : .black.opacity(0.15))
+                .allowsHitTesting(false)
+        }
+        .disabled(ids.isEmpty || phone.recording)
+        .accessibilityLabel("选择设备")
+        .help(phone.hasSelectedDevice ? deviceDetails(phone.deviceID) : "选择设备")
+        .popover(isPresented: $deviceMenuOpen, arrowEdge: .bottom) {
+            ScrollView {
+                VStack(spacing: 5) {
+                    ForEach(ids, id: \.self) { id in
+                        Button {
+                            deviceMenuOpen = false
+                            guard id != phone.deviceID, !phone.recording else { return }
+                            let resume = phone.mirroring
+                            if resume { phone.stop() }
+                            phone.deviceID = id
+                            if resume { phone.start() }
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(deviceTitle(id)).font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(id == phone.deviceID ? blue : Color.primary)
+                                    Text(deviceDetails(id)).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if id == phone.deviceID {
+                                    Image(systemName: "checkmark").foregroundStyle(blue)
+                                }
+                            }
+                            .padding(9)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.white, in: RoundedRectangle(cornerRadius: 5))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 5).strokeBorder(.black.opacity(0.09))
+                                    .allowsHitTesting(false)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(8)
+            }
+            .frame(width: 380, height: min(260, CGFloat(max(1, ids.count) * 56 + 16)))
+            .background(canvas)
+        }
+    }
+
+    private func deviceTitle(_ id: String) -> String {
+        let masked = id.count >= 8 ? "\(id.prefix(id.count == 8 ? 2 : 4))****\(id.suffix(id.count == 8 ? 2 : 4))" : id
+        let model = phone.harmonyModels[id] ?? phone.devices.first(where: { $0.id == id })?.name ?? "Harmony"
+        return "\(masked)（\(model)）"
+    }
+
+    private func deviceDetails(_ id: String) -> String {
+        let harmony = phone.harmonyDevices.contains(id)
+        let platform = harmony ? "Harmony" : "Android"
+        let system = harmony ? "HarmonyOS" : "Android"
+        let os = phone.osVersions[id].map { "\(system) \($0)" } ?? system
+        return "\(platform) · \(os)"
     }
 
     private var tools: some View {
@@ -635,10 +858,18 @@ struct AndroidUSB: App {
             VStack(spacing: 9) {
                 toolCard("按键区") {
                     HStack(spacing: 6) {
-                        tile("电源键", "power") { phone.command(["shell", "input", "keyevent", "26"]) }
-                        tile("返回", "arrow.left.circle") { phone.command(["shell", "input", "keyevent", "4"]) }
-                        tile("音量加", "speaker.plus") { phone.command(["shell", "input", "keyevent", "24"]) }
-                        tile("音量减", "speaker.minus") { phone.command(["shell", "input", "keyevent", "25"]) }
+                        tile("电源键", "power") { phone.command(phone.isHarmony ? ["shell", "uitest", "uiInput", "keyEvent", "Power"] :
+                            ["shell", "input", "keyevent", "26"]) }
+                        tile("返回", "arrow.left.circle") { phone.command(phone.isHarmony ? ["shell", "uitest", "uiInput", "keyEvent", "Back"] :
+                            ["shell", "input", "keyevent", "4"]) }
+                        tile("音量加", "speaker.plus") {
+                            phone.command(phone.isHarmony ? ["shell", "uitest", "uiInput", "keyEvent", "16"] :
+                                          ["shell", "input", "keyevent", "24"])
+                        }
+                        tile("音量减", "speaker.minus") {
+                            phone.command(phone.isHarmony ? ["shell", "uitest", "uiInput", "keyEvent", "17"] :
+                                          ["shell", "input", "keyevent", "25"])
+                        }
                         Spacer(minLength: 0)
                         sidebarButton("收起功能", icon: "sidebar.right") { toolsCollapsed = true }
                     }
@@ -647,7 +878,10 @@ struct AndroidUSB: App {
                     HStack(spacing: 6) {
                         tile("安装应用", "square.and.arrow.down", phone.install)
                         tile("卸载应用", "trash", phone.uninstall)
-                        tile("应用信息", "square.grid.2x2") { phone.command(["shell", "pm", "list", "packages", "-3"]) }
+                        tile("应用信息", "square.grid.2x2") {
+                            phone.command(phone.isHarmony ? ["shell", "bm", "dump", "-a"] :
+                                          ["shell", "pm", "list", "packages", "-3"])
+                        }
                     }
                 }
                 toolCard("文件信息") {
@@ -664,12 +898,22 @@ struct AndroidUSB: App {
                              phone.recording ? "stop.circle" : "video") {
                             if phone.recording { phone.stopRecording() } else { phone.startRecording() }
                         }
+
+                    }
+                }
+                toolCard("保存位置") {
+                    HStack {
+                        Text(phone.outputDirectory.isEmpty ? "下载文件夹" : phone.outputDirectory)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                        Button("更改目录…", action: phone.chooseOutputDirectory)
                     }
                 }
                 toolCard("自定义指令") {
                     HStack {
-                        Text("adb shell")
-                        TextField("输入 Android shell 命令", text: $shellCommand)
+                        Text(phone.isHarmony ? "hdc shell" : "adb shell")
+                        TextField("输入设备 shell 命令", text: $shellCommand)
                         Button("发送") { phone.command(["shell", shellCommand]) }
                             .buttonStyle(.borderedProminent)
                             .tint(blue)
@@ -749,7 +993,7 @@ struct AndroidUSB: App {
                     } else {
                         VStack(spacing: 11) {
                             Text(phone.mirroring ? "正在读取手机画面…" :
-                                 "在 Android 手机的「开发者选项」中开启 USB 调试，\n连接并授权后，点击上方的「开始投屏」。")
+                                 "在手机的「开发者选项」中开启 USB 调试，\n连接并授权后，点击上方的「开始投屏」。")
                                 .foregroundStyle(Color(red: 0.50, green: 0.53, blue: 0.58))
                         }
                     }

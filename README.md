@@ -31,3 +31,13 @@ brew install scrcpy android-platform-tools
 通过 USB 连接并信任这台 Mac。设备识别需要 `brew install libimobiledevice`，投屏首次启动需要允许 macOS 摄像头权限。投屏后可截屏，也可用 FFmpeg 录制约 10 FPS 的无声 MP4。文件推送和获取使用 Phone Studio 的独立调试文件区，获取时输入此前推送的文件名。
 
 点击、拖动、主屏幕、锁屏和音量键需要 WebDriverAgent。用 Xcode 为目标 iPhone 签名并运行 Appium 的 WebDriverAgentRunner 测试，让它在手机的 8100 端口监听。保持测试运行，App 会用 `iproxy` 从本机通过 USB 连接。安装和卸载 iOS 应用使用 Xcode 的 devicectl，安装要求为该手机签名的 iOS .app。
+
+## 项目结构
+
+- `Sources/App/` 管理应用入口、窗口状态和本地升级。
+- `Sources/Features/Navigation/` 放首页与工具目录。`Sources/Features/Mirroring/` 放投屏工作区、设备选择、预览和操作面板。
+- `Sources/Components/` 放可复用的卡片和侧栏。
+- `Sources/Devices/` 管理连接设备的状态，按发现、投屏、输入、设备操作和媒体导出分文件。`Devices/iOS/` 封装 iPhone 屏幕采集。
+- `Sources/Support/` 放通用的外部命令执行逻辑。
+
+新增独立工具时，在 `Sources/Features/` 下添加功能目录，并在工具目录和窗口导航中注册入口。Xcode 和本地构建脚本都会收录 `Sources/` 下的 Swift 文件。

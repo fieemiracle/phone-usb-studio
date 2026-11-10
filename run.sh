@@ -5,9 +5,10 @@ cd "$(dirname "$0")"
 app="build/Android USB.app"
 executable="$app/Contents/MacOS/AndroidUSB"
 if [[ ! -x "$executable" || ! -f "$app/Contents/Info.plist" ||
-      AndroidUSB.swift -nt "$executable" || Info.plist -nt "$executable" ||
+      Info.plist -nt "$executable" ||
       Studio.icns -nt "$executable" || ! -f "$app/Contents/Resources/Studio.icns" ||
-      build.sh -nt "$executable" ]]; then
+      build.sh -nt "$executable" ]] ||
+   [[ -n "$(find Sources -newer "$executable" -print -quit)" ]]; then
     ./build.sh
 fi
 

@@ -1,4 +1,4 @@
-# Phone USB Studio
+# phone-usb-studio
 
 macOS 上的 Android USB 投屏工具。用鼠标在 scrcpy 投屏窗口点击、长按或滑动，也可以从主窗口保存 PNG 截图。
 

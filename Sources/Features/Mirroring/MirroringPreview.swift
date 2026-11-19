@@ -4,6 +4,7 @@ import SwiftUI
 struct MirroringPreview: View {
     @ObservedObject var phone: Phone
     let zoom: Double
+    @GestureState private var pressedAt: ContinuousClock.Instant?
 
     var body: some View {
         GeometryReader { geometry in
@@ -23,9 +24,14 @@ struct MirroringPreview: View {
                         }
                         .shadow(color: .black.opacity(0.16), radius: 14, y: 7)
                         .contentShape(Rectangle())
-                        .gesture(DragGesture(minimumDistance: 0).onEnded {
-                            phone.input($0, size: size, image: frame)
-                        })
+                        .gesture(DragGesture(minimumDistance: 0)
+                            .updating($pressedAt) { _, start, _ in
+                                if start == nil { start = .now }
+                            }
+                            .onEnded {
+                                let duration = pressedAt?.duration(to: .now) ?? .zero
+                                phone.input($0, size: size, image: frame, heldFor: duration)
+                            })
                 } else {
                     VStack(spacing: 11) {
                         Text(phone.mirroring ? "正在读取手机画面…" :

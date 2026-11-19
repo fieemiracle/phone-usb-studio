@@ -30,7 +30,17 @@ brew install scrcpy android-platform-tools
 
 通过 USB 连接并信任这台 Mac。设备识别需要 `brew install libimobiledevice`，投屏首次启动需要允许 macOS 摄像头权限。投屏后可截屏，也可用 FFmpeg 录制约 10 FPS 的无声 MP4。文件推送和获取使用 Phone Studio 的独立调试文件区，获取时输入此前推送的文件名。
 
-点击、拖动、主屏幕、锁屏和音量键需要 WebDriverAgent。用 Xcode 为目标 iPhone 签名并运行 Appium 的 WebDriverAgentRunner 测试，让它在手机的 8100 端口监听。保持测试运行，App 会用 `iproxy` 从本机通过 USB 连接。安装和卸载 iOS 应用使用 Xcode 的 devicectl，安装要求为该手机签名的 iOS .app。
+点击、拖动、长按、主屏幕、锁屏和音量键需要 WebDriverAgent。开始投屏时 App 会通过 USB 检查触控服务，必要时在后台运行已签名的 WebDriverAgentRunner。停止投屏时，App 会结束由本次投屏启动的测试。
+
+首次配置时，将 Appium 的 WebDriverAgent 源码放到 `~/Library/Application Support/Phone USB Studio/WebDriverAgent`，用 Xcode 为目标 iPhone 配置 Runner 的开发签名。解锁手机并启用开发者模式，在源码目录运行一次以下命令，把 `设备UDID` 换成目标设备的 UDID。设备或签名变更后需重新构建。
+
+```sh
+xcodebuild -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner \
+  -destination "id=设备UDID" -derivedDataPath BuildCache \
+  -allowProvisioningUpdates build-for-testing
+```
+
+安装和卸载 iOS 应用使用 Xcode 的 devicectl，安装要求为该手机签名的 iOS .app。
 
 ## 项目结构
 

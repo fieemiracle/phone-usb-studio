@@ -30,6 +30,8 @@ final class Phone: ObservableObject {
     @AppStorage("outputDirectory") var outputDirectory = ""
     var previewProcess: Process?
     var iosCapture: IOSScreenCapture?
+    var wdaStartup: Task<Void, Never>?
+    var wdaRunner: Process?
     var wdaProxy: Process?
     var wdaPort = 0
     var wdaSession: String?

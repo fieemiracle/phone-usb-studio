@@ -56,6 +56,7 @@ extension Phone {
         previewID = id
         mirroring = true
         status = "正在打开 iPhone USB 屏幕源…"
+        startIOSControl(device: target, preview: id)
         Task {
             let authorized = await AVCaptureDevice.requestAccess(for: .video)
             guard previewID == id else { return }
@@ -67,7 +68,7 @@ extension Phone {
             let capture = IOSScreenCapture { [weak self] image in
                 Task { @MainActor in
                     guard let self, self.previewID == id else { return }
-                    if self.frame == nil { self.status = "iPhone USB 投屏已连接。" }
+                    if self.frame == nil { self.status += "\niPhone USB 投屏已连接。" }
                     self.frame = NSBitmapImageRep(cgImage: image)
                 }
             }

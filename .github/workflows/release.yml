@@ -13,9 +13,11 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Verify release version
+        run: test "$GITHUB_REF_NAME" = "v$(cat VERSION)"
       - name: Build universal DMG
         run: ./package.sh "$GITHUB_REF_NAME"
-      - name: Publish preview release
+      - name: Publish versioned release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -31,5 +33,5 @@ jobs:
           - iPhone USB 投屏需要 libimobiledevice（`brew install libimobiledevice`）及 macOS 摄像头授权。反控需要在目标 iPhone 上运行已签名的 WebDriverAgent，录屏需要 FFmpeg，应用管理需要 Xcode。
           NOTES
           gh release create "$GITHUB_REF_NAME" release/*.dmg --verify-tag \
-            --title "Phone Studio $GITHUB_REF_NAME" --prerelease \
+            --title "Phone Studio $GITHUB_REF_NAME" \
             --notes-file "$RUNNER_TEMP/phone-studio-release.md"

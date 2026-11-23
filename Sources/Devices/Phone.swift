@@ -36,12 +36,13 @@ final class Phone: ObservableObject {
     var wdaPort = 0
     var wdaSession: String?
     var wdaBusy = false
+    var harmonyPreviewDeviceID: String?
     var iosPreviewDeviceID: String?
     var scanningDevices = false
     var loadingVersions: Set<String> = []
     @Published var harmonyModels: [String: String] = [:]
 
-    var isHarmony: Bool { harmonyDevices.contains(deviceID) }
+    var isHarmony: Bool { harmonyPreviewDeviceID == deviceID || harmonyDevices.contains(deviceID) }
     var isIOS: Bool { iosPreviewDeviceID == deviceID || iosDevices.contains(deviceID) }
     var hasSelectedDevice: Bool { isIOS || isHarmony || devices.contains { $0.id == deviceID } }
 

@@ -11,10 +11,10 @@ struct ToolCard<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let title { Text(title).font(.system(size: 15, weight: .semibold)) }
+            if let title { Text(title).font(.system(size: 12, weight: .semibold)) }
             content
         }
-        .padding(11)
+        .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.background, in: RoundedRectangle(cornerRadius: 10))
         .overlay {

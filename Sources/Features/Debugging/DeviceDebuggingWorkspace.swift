@@ -69,6 +69,7 @@ struct DeviceDebuggingWorkspace: View {
         }
         .padding(16)
         .task {
+            if phone.mirroring { console.start(phone: phone) }
             while !Task.isCancelled {
                 phone.scanDevices()
                 try? await Task.sleep(for: .seconds(2))

@@ -51,3 +51,10 @@ xcodebuild -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner \
 - `Sources/Support/` 放通用的外部命令执行逻辑。
 
 新增独立工具时，在 `Sources/Features/` 下添加功能目录，并在工具目录和窗口导航中注册入口。Xcode 和本地构建脚本都会收录 `Sources/` 下的 Swift 文件。
+
+## 版本发布
+
+版本号由根目录的 `VERSION` 管理。修改版本号时同步更新 `Info.plist` 中的 `CFBundleShortVersionString`。
+
+运行 `./package.sh` 构建当前版本，安装包输出到 `release/Phone-Studio-v版本号-macOS-universal.dmg`。
+推送与 VERSION 一致的 `vX.Y.Z` 标签后，GitHub Actions 自动构建并创建对应版本的 GitHub Release。

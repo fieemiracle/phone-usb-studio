@@ -197,10 +197,19 @@ extension Phone {
         let end = point(drag.location)
         let moved = hypot(drag.translation.width, drag.translation.height) >= 5
         if isHarmony {
-            let gesture = moved ? ["swipe"] + start + end + ["2500"] : ["click"] + start
-            run("hdc", ["-t", deviceID, "shell", "uitest", "uiInput"] + gesture) { code, _, error in
-                if code != 0 { self.status = "鸿蒙触控失败。\n" + error }
+            let gesture = moved ? ["swipe"] + start + end + ["2500"] :
+                [heldFor >= .milliseconds(500) ? "longClick" : "click"] + start
+            run("hdc", ["-t", deviceID, "shell", "uitest", "uiInput"] + gesture) { code, data, error in
+                let output = String(decoding: data, as: UTF8.self)
+                if code != 0 || (output.localizedCaseInsensitiveContains("error") && !output.localizedCaseInsensitiveContains("no error")) ||
+                    output.contains("Missing parameter") || output.contains("failed") {
+                    self.status = "鸿蒙触控失败。\n" + output + error
+                }
             }
+            return
+        }
+        guard devices.contains(where: { $0.id == deviceID }) else {
+            status = "当前设备连接尚未就绪，请刷新设备后重新开始投屏。"
             return
         }
         let command = moved ? ["swipe"] + start + end + ["150"] : ["tap"] + start

@@ -7,7 +7,7 @@ executable="$app/Contents/MacOS/AndroidUSB"
 if [[ ! -x "$executable" || ! -f "$app/Contents/Info.plist" ||
       Info.plist -nt "$executable" ||
       Studio.icns -nt "$executable" || ! -f "$app/Contents/Resources/Studio.icns" ||
-      build.sh -nt "$executable" ]] ||
+      VERSION -nt "$executable" || build.sh -nt "$executable" ]] ||
    [[ -n "$(find Sources -newer "$executable" -print -quit)" ]]; then
     ./build.sh
 fi

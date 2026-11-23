@@ -9,6 +9,7 @@ extension Phone {
             return
         }
         if isHarmony {
+            harmonyPreviewDeviceID = deviceID
             previewID = UUID()
             mirroring = true
             status = "正在连接鸿蒙手机…"
@@ -166,6 +167,7 @@ extension Phone {
         iosCapture?.stop()
         iosCapture = nil
         iosPreviewDeviceID = nil
+        harmonyPreviewDeviceID = nil
         if let process = previewProcess, process.isRunning { process.terminate() }
         previewProcess = nil
         mirroring = false

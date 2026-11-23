@@ -6,6 +6,7 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" build/swift-cache
 cp Studio.icns "$app/Contents/Resources/Studio.icns"
 cp Info.plist "$app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable AndroidUSB" "$app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $(cat VERSION)" "$app/Contents/Info.plist"
 sources=()
 while IFS= read -r -d '' source; do
     sources+=("$source")

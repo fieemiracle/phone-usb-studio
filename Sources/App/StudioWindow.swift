@@ -10,7 +10,7 @@ struct StudioWindow: View {
     @State var zoom = 1.0
     @State var deviceMenuOpen = false
     @State var shellCommand = ""
-    let blue = Color(red: 0, green: 0.49, blue: 1)
+    let blue = Color(red: 0, green: 0.43, blue: 0.86)
 
     enum Page {
         case home, utilities, mirroring, debugging

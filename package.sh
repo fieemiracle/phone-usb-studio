@@ -2,7 +2,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-version="${1#v}"
+version="${1:-$(cat VERSION)}"
+version="${version#v}"
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Usage: $0 vX.Y.Z" >&2; exit 2; }
 output_dir="${2:-release}"
 mkdir -p "$output_dir"
@@ -16,7 +17,7 @@ xcodebuild -project PhoneUSBStudio.xcodeproj -scheme PhoneUSBStudio \
 mkdir "$temp_dir/image"
 app="$temp_dir/image/Phone Studio.app"
 ditto "$temp_dir/derived/Build/Products/Release/Phone Studio.app" "$app"
-/usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $version" "$app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
 codesign --force --sign - "$app"
 codesign --verify --strict "$app"
 lipo "$app/Contents/MacOS/Phone Studio" -verify_arch arm64 x86_64

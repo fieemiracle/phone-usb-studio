@@ -7,7 +7,7 @@
 	<key>CFBundleIdentifier</key>
 	<string>local.android-usb</string>
 	<key>CFBundleName</key>
-	<string>Android USB</string>
+	<string>Phone Studio</string>
 	<key>CFBundleIconFile</key>
 	<string>Studio.icns</string>
 	<key>CFBundleDisplayName</key>

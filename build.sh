@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")"
-app="build/Android USB.app"
+app="build/Phone Studio.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" build/swift-cache
 cp Studio.icns "$app/Contents/Resources/Studio.icns"
 cp Info.plist "$app/Contents/Info.plist"

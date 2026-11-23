@@ -14,7 +14,8 @@ extension StudioWindow {
 
             navigation("首页", icon: "house", destination: .home, selected: page == .home)
             navigation("实用工具", icon: "wrench.and.screwdriver",
-                       destination: .utilities, selected: page != .home)
+                       destination: .utilities, selected: page == .utilities || page == .mirroring)
+            navigation("设备调试", icon: "terminal", destination: .debugging, selected: page == .debugging)
             Spacer()
             if Bundle.main.object(forInfoDictionaryKey: "StudioLocalSource") != nil {
                 Button(action: LocalAppUpdater.install) {

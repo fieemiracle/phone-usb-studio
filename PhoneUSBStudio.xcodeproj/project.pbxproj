@@ -12,7 +12,7 @@
 
 /* Begin PBXFileReference section */
 		000000000000000000000006 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		000000000000000000000007 /* Android USB.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; path = "Android USB.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		000000000000000000000007 /* Phone Studio.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; path = "Phone Studio.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		000000000000000000000010 /* App.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = App.xcconfig; sourceTree = SOURCE_ROOT; };
 		000000000000000000000011 /* Studio.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = Studio.icns; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -36,7 +36,7 @@
 		000000000000000000000003 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				000000000000000000000007 /* Android USB.app */,
+				000000000000000000000007 /* Phone Studio.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -60,7 +60,7 @@
 			);
 			name = PhoneUSBStudio;
 			productName = PhoneUSBStudio;
-			productReference = 000000000000000000000007 /* Android USB.app */;
+			productReference = 000000000000000000000007 /* Phone Studio.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */

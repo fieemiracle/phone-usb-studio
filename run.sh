@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-app="build/Android USB.app"
+app="build/Phone Studio.app"
 executable="$app/Contents/MacOS/AndroidUSB"
 if [[ ! -x "$executable" || ! -f "$app/Contents/Info.plist" ||
       Info.plist -nt "$executable" ||
@@ -15,7 +15,7 @@ fi
 target="$app"
 if [[ "${1:-}" == "--install" ]]; then
     install_dir="$HOME/Applications"
-    target="$install_dir/Phone USB Studio.app"
+    target="$install_dir/Phone Studio.app"
     mkdir -p "$install_dir"
     if [[ -e "$target" ]]; then
         identifier=$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$target/Contents/Info.plist")
@@ -23,11 +23,11 @@ if [[ "${1:-}" == "--install" ]]; then
     fi
     staging=$(mktemp -d "$install_dir/.phone-studio-update.XXXXXX")
     trap 'rm -rf "$staging"' EXIT
-    ditto "$app" "$staging/Phone USB Studio.app"
-    /usr/libexec/PlistBuddy -c 'Add :StudioLocalSource string' "$staging/Phone USB Studio.app/Contents/Info.plist"
-    /usr/libexec/PlistBuddy -c "Set :StudioLocalSource $PWD" "$staging/Phone USB Studio.app/Contents/Info.plist"
-    codesign --force --sign - "$staging/Phone USB Studio.app"
-    codesign --verify --strict "$staging/Phone USB Studio.app"
+    ditto "$app" "$staging/Phone Studio.app"
+    /usr/libexec/PlistBuddy -c 'Add :StudioLocalSource string' "$staging/Phone Studio.app/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :StudioLocalSource $PWD" "$staging/Phone Studio.app/Contents/Info.plist"
+    codesign --force --sign - "$staging/Phone Studio.app"
+    codesign --verify --strict "$staging/Phone Studio.app"
 fi
 
 swift -module-cache-path build/swift-cache - <<'SWIFT'
@@ -52,7 +52,7 @@ if [[ "${1:-}" == "--install" ]]; then
     if [[ -e "$target" ]]; then
         mv "$target" "$staging/previous.app"
     fi
-    if ! mv "$staging/Phone USB Studio.app" "$target"; then
+    if ! mv "$staging/Phone Studio.app" "$target"; then
         if [[ -e "$staging/previous.app" ]]; then
             mv "$staging/previous.app" "$target" || { trap - EXIT; exit 1; }
         fi

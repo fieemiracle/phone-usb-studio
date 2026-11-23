@@ -13,7 +13,7 @@ struct StudioWindow: View {
     let blue = Color(red: 0, green: 0.49, blue: 1)
 
     enum Page {
-        case home, utilities, mirroring
+        case home, utilities, mirroring, debugging
     }
 
     var body: some View {
@@ -26,6 +26,8 @@ struct StudioWindow: View {
             switch page {
             case .home, .utilities:
                 landing
+            case .debugging:
+                DeviceDebuggingWorkspace(phone: phone)
             case .mirroring:
                 MirroringWorkspace(phone: phone, previewExpanded: $previewExpanded,
                                    toolsCollapsed: $toolsCollapsed, zoom: $zoom,

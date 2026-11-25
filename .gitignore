@@ -5,3 +5,16 @@ build/
 xcuserdata/
 DerivedData/
 release/
+.env
+.env.*
+!.env.example
+*.p12
+*.pfx
+*.pem
+*.key
+*.mobileprovision
+*.provisionprofile
+*.cer
+*.cert
+*.log
+*.xcresult/

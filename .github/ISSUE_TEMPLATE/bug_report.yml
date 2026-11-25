@@ -1,0 +1,28 @@
+name: 问题反馈
+description: 报告投屏、触控、日志或安装问题
+title: "[Bug] "
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Phone Studio 版本与 macOS 版本
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: 手机型号与系统版本
+      description: 请勿填写设备序列号、UDID 或账号信息。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤、预期与实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 脱敏日志或截图
+      description: 提交前删除手机号、地址、订单号、令牌、请求参数中的个人信息。
